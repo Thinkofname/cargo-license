@@ -10,10 +10,8 @@ repository = "https://github.com/onur/cargo-license"
 [dependencies]
 cargo = "0.19"
 error-chain = "0.10"
-getopts = "0.2.14"
 toml = "0.2"
-ansi_term = "0.9"
 
 [[bin]]
-name = "cargo-license"
-path = "src/cargo-license.rs"
+name = "cargo-unilicense"
+path = "src/cargo-unilicense.rs"
