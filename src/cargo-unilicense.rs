@@ -7,7 +7,11 @@ fn main() {
 
     println!("[");
     for dependency in dependencies {
-        let license = dependency.get_license().unwrap_or("N/A".to_owned());
+        let license = if let Some(dep) = dependency.get_license() {
+            dep
+        } else {
+            continue
+        };
         println!(r#"{{"name": {:?}, "version": {:?}, "license": {:?}}}"#, dependency.name, dependency.version, license);
     }
     println!("]");
