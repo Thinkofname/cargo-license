@@ -4,9 +4,12 @@ extern crate cargo;
 extern crate toml;
 #[macro_use]
 extern crate error_chain;
+extern crate cargo_metadata;
+extern crate semver;
 
 use std::io;
 use cargo::util::CargoResult;
+use std::path::Path;
 
 // I thought this crate is a good example to learn error_chain
 // but looks like no need of it in this crate
@@ -19,6 +22,7 @@ error_chain! {
 
     foreign_links {
         Io(io::Error);
+        Metadata(cargo_metadata::Error);
     }
 
     errors {}
@@ -93,52 +97,108 @@ impl Dependency {
     }
 }
 
+fn expand_package(
+    metadata: &cargo_metadata::Metadata,
+    package: &cargo_metadata::Package,
+    source: &str,
+    features: &[String],
+    uses_default_features: bool,
+    deps_out: &mut Vec<Dependency>,
+) {
+    // Add self (dups removed later hopefully)
 
+    deps_out.push(Dependency {
+        name: package.name.clone(),
+        version: package.version.clone(),
+        source: source.to_owned(),
+    });
+
+    let mut full_features = Vec::new();
+    let mut tmp_features = features.to_owned();
+    if uses_default_features {
+        if let Some(features) = package.features.get("default") {
+            tmp_features.extend(features.iter().cloned());
+        }
+    }
+    while let Some(f) = tmp_features.pop() {
+        if !f.contains('/') {
+            if let Some(features) = package.features.get(&f) {
+                tmp_features.extend(features.iter().cloned());
+            }
+        }
+        full_features.push(f);
+    }
+
+    for dep in &package.dependencies {
+        if dep.kind != cargo_metadata::DependencyKind::Normal {
+
+            continue;
+        }
+        if dep.optional {
+            if !full_features.contains(&dep.name) {
+
+                continue;
+            }
+        }
+
+        let prefix = format!("{}/", dep.name);
+        let mut dep_features = full_features.iter()
+            .filter(|v| v.contains('/'))
+            .map(|v| v.trim_left_matches(&prefix))
+            .map(|v| v.to_owned())
+            .collect::<Vec<_>>();
+        dep_features.extend(dep.features.iter().cloned());
+        let package = metadata.packages
+            .iter()
+            .find(|v| v.name == dep.name && dep.req.matches(&semver::Version::parse(&v.version).unwrap()))
+            .expect("Missing dep");
+        expand_package(metadata, package, dep.source.as_ref().map_or("", |v| v.as_str()), &dep_features, dep.uses_default_features, deps_out);
+    }
+}
 
 pub fn get_dependencies_from_cargo_lock() -> Result<Vec<Dependency>> {
-    let toml = {
-        use std::fs::File;
-        use std::io::Read;
+    let metadata = cargo_metadata::metadata_deps(Some(Path::new("Cargo.toml")), true)?;
 
-        let lock_file = File::open("Cargo.lock")?;
-        let mut reader = io::BufReader::new(lock_file);
-        let mut content = String::new();
-        reader.read_to_string(&mut content)?;
-        content
+    let packages = {
+        let mut args = std::env::args().skip_while(|val| !val.starts_with("--packages"));
+        match args.next() {
+            Some(ref p) if p == "--packages" => args.next(),
+            Some(p) => Some(p.trim_left_matches("--packages=").to_string()),
+            None => None,
+        }.expect("Missing package")
     };
+    let features = {
+        let mut args = std::env::args().skip_while(|val| !val.starts_with("--features"));
+        match args.next() {
+            Some(ref p) if p == "--features" => args.next(),
+            Some(p) => Some(p.trim_left_matches("--features=").to_string()),
+            None => None,
+        }
+    };
+    let packages = packages.split(',');
+    let features = features
+        .map_or_else(Vec::new, |v| v.split(',').map(|v| v.to_owned()).collect::<Vec<_>>());
 
-    // This code once was beautiful, but it became ugly after rustfmt
-    let dependencies: Vec<Dependency> = toml::Parser::new(&toml)
-                                                 .parse()
-                                                 .as_ref()
-                                                 .and_then(|p| p.get("package"))
-                                                 .and_then(|p| p.as_slice())
-                                                 .ok_or("Package not found")
-                                                 .map(|p| {
-        p.iter()
-            .map(|p| {
-                Dependency {
-                    name: p.as_table()
-                        .and_then(|n| n.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap()
-                        .to_owned(),
-                    version: p.as_table()
-                        .and_then(|n| n.get("version"))
-                        .and_then(|n| n.as_str())
-                        .unwrap()
-                        .to_owned(),
-                    source: p.as_table()
-                        .and_then(|n| n.get("source"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
-                }
+    let mut deps = Vec::new();
+
+    for package in packages {
+
+        let package = metadata.packages
+            .iter()
+            .find(|v| v.name == package)
+            .expect("Missing package");
+        expand_package(&metadata, package, "local package", &features, true, &mut deps);
+    }
+
+    deps.sort_by(|a, b| {
+        a.name.cmp(&b.name)
+            .then_with(|| {
+                a.version.cmp(&b.version)
             })
-            .collect()
-    })?;
+    });
+    deps.dedup_by(|a, b| a.name == b.name && a.version == b.version);
 
-    Ok(dependencies)
+    return Ok(deps);
 }
 
 
