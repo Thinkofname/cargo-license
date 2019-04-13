@@ -38,33 +38,38 @@ pub struct Dependency {
 
 impl Dependency {
     fn get_cargo_package(&self) -> CargoResult<cargo::core::Package> {
-        use cargo::core::{Source, SourceId, Registry};
+        use cargo::core::{Source, SourceId};
         use cargo::core::Dependency as CargoDependency;
-        use cargo::util::{Config, human};
+        use cargo::util::{Config, errors::internal};
         use cargo::sources::SourceConfigMap;
 
         // TODO: crates-license is only working for crates.io registry
         if !self.source.starts_with("registry") {
-            Err(human("registry sources are unimplemented"))?;
+            Err(internal("registry sources are unimplemented"))?;
         }
 
         let config = Config::default()?;
         let source_id = SourceId::from_url(&self.source)?;
 
         let source_map = SourceConfigMap::new(&config)?;
-        let mut source = source_map.load(&source_id)?;
+        let mut source = source_map.load(source_id, &Default::default())?;
 
         // update crates.io-index registry
         source.update()?;
 
         let dep =
-            CargoDependency::parse_no_deprecated(&self.name, Some(&self.version), &source_id)?;
-        let deps = source.query(&dep)?;
-        deps.iter()
+            CargoDependency::parse_no_deprecated(&self.name, Some(&self.version), source_id)?;
+        let deps = source.query_vec(&dep)?;
+        if let cargo::core::source::MaybePackage::Ready(pck) = deps.iter()
             .map(|p| p.package_id())
             .max()
             .map(|pkgid| source.download(pkgid))
-            .unwrap_or(Err(human("PKG download error")))
+            .unwrap_or(Err(internal("PKG download error")))?
+        {
+            Ok(pck)
+        } else {
+            Err(internal("package isn't downloaded"))
+        }
     }
 
     fn normalize(&self, license_string: &Option<String>) -> Option<String> {
